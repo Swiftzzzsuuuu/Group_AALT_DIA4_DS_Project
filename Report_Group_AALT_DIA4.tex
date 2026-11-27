@@ -1,0 +1,305 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{booktabs,tabularx,array,graphicx,float,caption}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\setlist{nosep,leftmargin=1.4em,topsep=3pt}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{5pt}
+\titleformat{\section}{\large\bfseries}{\thesection.}{0.5em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{0.5em}{}
+\titlespacing*{\section}{0pt}{12pt}{4pt}
+\titlespacing*{\subsection}{0pt}{8pt}{2pt}
+\captionsetup{font=small,labelfont=bf}
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0pt}
+\fancyfoot[L]{\small ESILV -- Machine Learning Project -- Group AALT (DIA4) -- Week 3}
+\fancyfoot[R]{\small\thepage}
+\newcolumntype{L}{>{\raggedright\arraybackslash}X}
+\begin{document}
+\begin{center}
+{\small ESILV -- De Vinci Group \hfill A4 -- Data \& Artificial Intelligence \hfill 2026--2027}\\[2pt]
+\rule{\textwidth}{0.6pt}\\[12pt]
+{\Large\bfseries Early Detection of Students at Risk of Dropout\\[4pt] with Machine Learning}\\[8pt]
+{\large Week 3 Report: Model Development and Experiments}\\[10pt]
+Léo Chen \quad--\quad Adam Gaabi \quad--\quad Timéo Brajon \quad--\quad Axel Warot\\[4pt]
+{\small Group AALT -- DIA4 \quad|\quad November 2026}\\[6pt]
+\rule{\textwidth}{0.6pt}
+\end{center}
+
+\section*{Summary}
+\textbf{Week 2} (sections 1--7): we cleaned and analysed the UCI \textit{Predict Students' Dropout and Academic Success} dataset (4,424 students, 36 features, 3 classes), built a leakage-safe pipeline and a logistic regression baseline (macro-F1 = 0.679 after semester 1) and a first AutoML pipeline (v0.1).
+
+\textbf{Week 3} (sections 8--14): AutoML v0.2, with every model evaluated by nested cross-validation on the \textbf{same 5 outer folds} of the training set (test set still sealed).
+\begin{itemize}
+\item \textbf{Best model: soft voting} (logistic regression + random forest + LightGBM), macro-F1 = \textbf{0.709}, +0.025 over the baseline, better on 5/5 folds. LightGBM alone: 0.702.
+\item \textbf{Imbalance:} class weights beat SMOTE and undersampling.
+\item \textbf{Decision threshold} tuned inside the training folds: dropout recall 0.71 $\rightarrow$ \textbf{0.80} (our target), precision 0.82 $\rightarrow$ 0.71.
+\item \textbf{Out-of-course model, TabNet:} 0.626, the weakest model, in line with recent benchmarks on medium-sized tabular data.
+\item \textbf{New cohort} (leave-one-cohort-out): $-0.02$ macro-F1, same ranking of the models.
+\end{itemize}
+
+\section{Business scope (reminder)}
+The school wants to flag students at risk of dropping out early enough to offer support. We predict the final status of each student (\textit{Dropout}, \textit{Enrolled}, \textit{Graduate}) in three scenarios that match the moment of the prediction: \textbf{A} at enrollment, \textbf{B} after semester 1 (main use case), \textbf{C} after semester 2 (upper bound).
+
+\section{Data description and exploration}
+\textbf{Source:} UCI Machine Learning Repository, dataset 697 (Realinho et al., 2021, CC BY 4.0), students of the Polytechnic Institute of Portalegre enrolled from 2008/09 to 2018/19.
+
+\textbf{Quality checks} (notebook \texttt{01}):
+\begin{itemize}
+\item \textbf{Missing values and duplicates:} none. Column names are normalised to snake case (typo \textit{Nacionality} fixed, whitespace stripped).
+\item \textbf{Variable types:} 9 nominal codes (course, application mode, parents' qualification and occupation\dots), 8 binary flags, 7 numeric enrollment variables, 6 variables per semester. Nominal codes have no order, so they must be one-hot encoded, not used as numbers.
+\item \textbf{Imbalanced target:} Graduate 2,209 (49.9\%), Dropout 1,421 (32.1\%), Enrolled 794 (17.9\%) (Figure~\ref{fig:eda}).
+\item \textbf{Outliers:} IQR outliers exist (age up to 70, up to 20 credited units) but they are valid values that carry risk information, so they are kept.
+\item \textbf{Zero grades:} a semester grade of 0 means \textit{no grade} (no unit evaluated), not a mark of 0/20: 718 students in semester 1, 79\% of them drop out.
+\item \textbf{Macro-economic variables:} unemployment, inflation and GDP only take 10 combinations: they identify the enrollment cohort, not the student.
+\item \textbf{Redundancy:} semester 1 and 2 variables are highly correlated ($|\rho|$ up to 0.94).
+\item \textbf{Strong signals:} 87\% of students with tuition fees not up to date drop out; dropouts approve far fewer units in semester 1.
+\end{itemize}
+
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=0.27\textwidth]{figures/target.png}\hfill
+\includegraphics[width=0.71\textwidth]{figures/distributions.png}
+\caption{Target distribution (left) and distributions of four key variables by class (right).}
+\label{fig:eda}
+\end{figure}
+
+\section{Preprocessing}
+\begin{itemize}
+\item \textbf{Clean dataset:} \texttt{data/processed/students\_clean.csv} (4,424 rows, renamed and typed columns).
+\item \textbf{Feature engineering} (row by row, no leakage): \texttt{approval\_rate} = approved / enrolled and \texttt{no\_grade} flag, for each semester.
+\item \textbf{Encoding:} one-hot encoding of nominal codes with rare categories (< 20 training students) grouped as \textit{infrequent}; binary flags kept as 0/1; numeric features standardised.
+\item \textbf{Scenarios:} A = 24 raw features (107 after encoding), B = A + 6 semester-1 features + 2 engineered (115), C = B + semester 2 (123).
+\end{itemize}
+
+\section{Learning and testing plan}
+\begin{itemize}
+\item \textbf{Split:} stratified 80/20 train/test split, seed 42 (3,539 / 885 students). The test set is not used for any decision before week 4.
+\item \textbf{Validation:} repeated stratified 5-fold CV (3 repeats) on the training set; nested CV when hyperparameters are tuned. No fixed validation set, to keep enough data.
+\item \textbf{Metrics:} macro-F1 (main), balanced accuracy, recall and precision on \textit{Dropout}, F1 on \textit{Enrolled}, one-vs-rest ROC-AUC, Brier score for probabilities.
+\item \textbf{Leakage guards:} encoder, scaler, feature selection and class weights are inside one scikit-learn \texttt{Pipeline} refitted on each training fold; semester-2 features are excluded from scenarios A and B.
+\end{itemize}
+
+\section{Baseline}
+\textbf{Choice:} majority class (floor) and multinomial logistic regression with \texttt{class\_weight="balanced"}: simple, fast, interpretable, and strong on tabular data.
+
+\begin{table}[!htb]
+\centering\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}llcccccc@{}}
+\toprule
+Scenario & Model & Macro-F1 & Bal.\ acc. & Accuracy & Dropout rec. & Enrolled F1 & ROC-AUC\\
+\midrule
+all & Majority class & 0.222 & 0.333 & 0.499 & 0.000 & 0.000 & 0.500\\
+A -- enrollment & LogReg balanced & 0.573 & 0.584 & 0.606 & 0.590 & 0.401 & 0.773\\
+\textbf{B -- semester 1} & \textbf{LogReg balanced} & \textbf{0.679} & \textbf{0.686} & 0.721 & 0.699 & 0.480 & 0.863\\
+B -- semester 1 & LogReg unweighted & 0.670 & 0.663 & 0.754 & 0.750 & 0.406 & 0.866\\
+C -- all & LogReg balanced & 0.715 & 0.723 & 0.755 & 0.738 & 0.527 & 0.888\\
+\bottomrule
+\end{tabular}
+\caption{Baseline results, repeated stratified 5-fold CV on the training set (std of macro-F1 $\le$ 0.021).}
+\end{table}
+
+\begin{itemize}
+\item Semester-1 data adds +0.11 macro-F1 over enrollment data; semester 2 only +0.04 more.
+\item Class weights improve macro-F1 and \textit{Enrolled} F1 (+0.07) at the cost of accuracy, as expected with imbalanced classes.
+\item \textbf{Calibration of C:} nested CV gives macro-F1 = 0.693 $\pm$ 0.020; the score is almost flat for C between 0.03 and 10, so the baseline keeps C = 1.
+\item \textbf{Probability calibration:} out-of-fold dropout probabilities are well calibrated (mean predicted 0.31--0.32 vs.\ observed 0.32, Brier 0.105--0.109, Figure~\ref{fig:base}).
+\item \textbf{Sensitivity:} removing \texttt{tuition\_fees\_up\_to\_date} and \texttt{debtor} from scenario A lowers macro-F1 from 0.573 to 0.537.
+\end{itemize}
+
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=0.36\textwidth]{figures/confusion_baseline.png}\hspace{1cm}
+\includegraphics[width=0.4\textwidth]{figures/calibration.png}
+\caption{Baseline, scenario B: out-of-fold confusion matrix (left) and reliability diagram for P(Dropout) (right).}
+\label{fig:base}
+\end{figure}
+
+\section{State-of-the-art benchmark}
+\begin{table}[!htb]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}p{3.6cm} p{3.9cm} L@{}}
+\toprule
+Study & Setting & Reported performance\\
+\midrule
+Martins et al.\ (2021) & 3 classes, enrollment data only, SMOTE / ADASYN & XGBoost and gradient boosting best; minority classes remain hard to predict\\
+Villar \& de Andrade (2024) & 3 classes, SMOTE, LightGBM / CatBoost tuned with Optuna & Per-class F1 $\approx$ 0.86 (Graduate), 0.88 (Dropout), 0.83--0.84 (Enrolled)\\
+Kim et al.\ (2023) & Binary (Enrolled removed), all features & ROC-AUC 0.955 (random forest); 0.811 on average without academic features\\
+\bottomrule
+\end{tabularx}
+\caption{Published results on the same dataset.}
+\end{table}
+These results are not directly comparable: different tasks (binary vs.\ 3 classes), feature sets and protocols. The very high \textit{Enrolled} F1 reported by Villar \& de Andrade (0.84, vs.\ 0.48--0.53 for us) is unusual for the hardest class; it will be checked in week 3 (resampling before or after the split, evaluation on original or resampled data). Our target is a \textbf{leakage-free} result, compared with boosting models as in the literature.
+
+\section{AutoML pipeline v0.1}
+One pipeline = preprocessing $\rightarrow$ feature selection (none, ANOVA top-20 / top-40, $\ell_1$ logistic regression) $\rightarrow$ model (logistic regression, decision tree, k-NN, SVM RBF, Gaussian naive Bayes, random forest), with their main hyperparameters and class weights. A randomised search (90 configurations $\times$ 5 folds, 155 s) maximises macro-F1 on scenario B.
+
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=0.72\textwidth]{figures/automl.png}
+\caption{CV macro-F1 of the 90 sampled configurations (dark dot = best per family).}
+\end{figure}
+
+\begin{table}[!htb]
+\centering\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Scenario & Baseline LogReg & AutoML best (random forest) & Gain\\
+\midrule
+A -- enrollment & 0.573 & 0.584 $\pm$ 0.015 & +0.011\\
+B -- semester 1 & 0.679 & 0.691 $\pm$ 0.018 & +0.012\\
+C -- all & 0.715 & 0.725 $\pm$ 0.018 & +0.010\\
+\bottomrule
+\end{tabular}
+\caption{Macro-F1 of the best AutoML configuration (repeated 5-fold CV) vs.\ the baseline.}
+\end{table}
+Random forest (0.689), SVM (0.687) and logistic regression (0.685) are almost tied in the search; decision tree, k-NN and naive Bayes are clearly below. The gain over the baseline is small and the selected score is slightly optimistic (chosen on the same folds): week 3 will use nested CV for the final comparison.
+
+\section{Limitations of AutoML v0.1}
+\begin{itemize}
+\item \textbf{Optimistic score:} the best configuration was chosen and scored on the same folds.
+\item \textbf{No boosting}, although gradient boosting is the reference on tabular data and in the literature on this dataset.
+\item \textbf{Default decision rule:} dropout recall $\approx$ 0.70, below our 0.80 target.
+\item \textbf{Enrolled class:} F1 $\approx$ 0.49, it limits macro-F1.
+\item \textbf{Random folds only:} no check on a new cohort of students.
+\end{itemize}
+
+\section{Learning and testing plan (v0.2)}
+\begin{itemize}
+\item \textbf{Data:} scenario B (after semester 1, 32 raw features) for all comparisons; scenarios A and C for the best model. Test set (885 students) still sealed.
+\item \textbf{Outer loop:} the same stratified 5-fold split (seed 42) for every model, so models are compared \textbf{fold by fold} (paired comparison). On these folds the baseline scores 0.684 (0.679 with the repeated 5$\times$3 CV of week 2).
+\item \textbf{Inner loop:} hyperparameters tuned by randomised search (20 configurations $\times$ 3 inner folds) inside each outer training fold; decision threshold chosen on inner out-of-fold probabilities; TabNet early-stopped on an inner 15\% validation split.
+\item \textbf{Overfitting control:} regularisation (L2, learning rate, subsampling, minimum leaf size), early stopping, and train vs.\ validation scores (Table~\ref{tab:ofit}).
+\item \textbf{Robustness:} leave-one-cohort-out validation (10 cohorts).
+\end{itemize}
+
+\section{Advanced models: gradient boosting}
+We added the boosting algorithms seen in class: HistGradientBoosting (scikit-learn), LightGBM (Ke et al., 2017) and XGBoost (Chen \& Guestrin, 2016), tuned by nested CV, together with a tuned random forest.
+
+\begin{table}[!htb]
+\centering\footnotesize
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+Model (scenario B) & Macro-F1 & Std & Bal.\ acc. & Dropout rec. & Enrolled F1 & Folds won vs.\ baseline\\
+\midrule
+LightGBM & \textbf{0.702} & 0.025 & 0.706 & 0.718 & 0.513 & 5/5\\
+HistGradientBoosting & 0.699 & 0.018 & 0.702 & 0.718 & 0.503 & 4/5\\
+Random forest & 0.688 & 0.028 & 0.686 & 0.715 & 0.480 & 3/5\\
+Baseline LogReg & 0.684 & 0.022 & 0.692 & 0.699 & 0.488 & --\\
+XGBoost & 0.681 & 0.035 & 0.672 & 0.759 & 0.423 & 3/5\\
+\bottomrule
+\end{tabular}
+\caption{Nested cross-validation, same 5 outer folds.}
+\end{table}
+LightGBM gains +0.018 macro-F1 on average and wins on every fold. XGBoost has no class weight option: it neglects \textit{Enrolled} (F1 0.42), even with a higher dropout recall.
+
+\section{Class imbalance and decision threshold}
+Resampling is placed inside an \texttt{imblearn} pipeline, so validation folds keep the real class distribution.
+
+\begin{table}[!htb]
+\centering\footnotesize
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Strategy & LogReg macro-F1 & \multicolumn{3}{c}{LightGBM: macro-F1 / Enrolled F1 / accuracy}\\
+\midrule
+None & 0.669 & 0.669 & 0.393 & 0.754\\
+\textbf{Class weights} & \textbf{0.684} & \textbf{0.703} & \textbf{0.519} & 0.744\\
+SMOTE (Chawla et al., 2002) & 0.669 & 0.679 & 0.435 & 0.749\\
+Random undersampling & 0.677 & 0.687 & 0.499 & 0.723\\
+\bottomrule
+\end{tabular}
+\caption{Imbalance strategies, scenario B.}
+\end{table}
+
+Class weights are the best strategy for both models and create no synthetic students. To reach the week-1 target of 80\% of dropouts detected, we predict \textit{Dropout} when $P(\mathrm{Dropout}) \ge t$. In each outer training fold, $t$ is the largest threshold reaching recall $\ge$ 0.80 on inner out-of-fold probabilities ($t \approx 0.28$).
+
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=0.48\textwidth]{figures/w3_threshold.png}
+\caption{Dropout recall and precision vs.\ threshold (LightGBM, out-of-fold).}
+\end{figure}
+
+With the threshold, LightGBM reaches a dropout recall of \textbf{0.804} (LogReg 0.820) instead of 0.71, but dropout precision falls from 0.82 to 0.71 and macro-F1 from 0.703 to 0.671. This is a business trade-off: more students are offered support for fewer missed dropouts.
+
+\section{Ensemble learning}
+\begin{itemize}
+\item \textbf{Soft voting:} average of the probabilities of logistic regression, random forest and LightGBM (diverse models: linear, bagging, boosting).
+\item \textbf{Stacking} (Wolpert, 1992): a logistic regression combines their out-of-fold probabilities.
+\end{itemize}
+Members use the hyperparameters tuned on the whole training set; all candidates of this section share this small optimistic bias, so their comparison is fair. Soft voting reaches \textbf{0.709} (LightGBM 0.703, random forest 0.695, stacking 0.697). Across scenarios, soft voting improves the baseline by +0.024 at enrollment (0.594), +0.025 after semester 1 (0.709) and +0.022 with both semesters (0.733).
+
+\begin{table}[!htb]
+\centering\footnotesize
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Model & Train macro-F1 & Validation macro-F1 & Gap\\
+\midrule
+LogReg (balanced) & 0.723 & 0.684 & 0.039\\
+Random forest & 0.998 & 0.695 & 0.302\\
+LightGBM & 0.817 & 0.703 & 0.114\\
+Soft voting & 0.886 & 0.709 & 0.176\\
+\bottomrule
+\end{tabular}
+\caption{Overfitting control (same outer folds).}
+\label{tab:ofit}
+\end{table}
+The random forest memorises the training set (leaves of one student) while LightGBM is regularised. Since every model is selected only on validation folds, the gap does not bias the comparison, but it motivates a more regularised forest in week 4.
+
+\section{Out-of-course model: TabNet}
+\textbf{Algorithm.} TabNet (Arik \& Pfister, 2021) is a deep neural network for tabular data. At each of its decision steps, an \textit{attentive transformer} builds a sparse mask (sparsemax) that selects a few features; a \textit{feature transformer} processes them; the outputs of all steps are added to make the prediction. The masks give a built-in feature importance.
+
+\textbf{Justification.} It is designed for tabular data, it is interpretable, and the authors report results close to gradient boosting. Grinsztajn et al.\ (2022) show that tree-based models still often win on medium-sized tabular data: we test this claim on our 3,539 students.
+
+\textbf{Implementation.} \texttt{pytorch-tabnet}, 3 configurations ($n_d = n_a \in \{8, 16, 24\}$, 3--5 steps), class re-weighting, early stopping on an inner 15\% validation split, same outer folds.
+
+\textbf{Results.} TabNet reaches macro-F1 = \textbf{0.626}, below the baseline (0.684), a scikit-learn MLP (0.664) and LightGBM (0.702). It needs 352 s for 5 folds and its chosen configuration changes from fold to fold. Its masks rank course and semester-1 approved units and grade first, but also put \texttt{father\_occupation} 4th and leave out tuition fees, a strong signal in the EDA: they are not reliable enough on their own to explain the risk.
+
+\section{Comparison and analysis}
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=0.78\textwidth]{figures/w3_comparison.png}
+\caption{Macro-F1 of all week-3 models on the 5 outer folds (grey dots), mean $\pm$ std; dashed line = baseline.}
+\end{figure}
+\begin{itemize}
+\item \textbf{Ranking:} soft voting (0.709) $>$ LightGBM (0.702) $>$ HistGradientBoosting (0.699) $>$ stacking (0.697) $>$ random forest (0.688) $>$ baseline (0.684) $>$ XGBoost (0.681) $>$ MLP (0.664) $>$ TabNet (0.626).
+\item \textbf{Size of the gain:} +0.025 over the baseline, about one fold standard deviation. It is consistent (5/5 folds) but modest: the logistic regression baseline is strong on this data.
+\item \textbf{Literature:} our macro-F1 is below the per-class F1 $\approx$ 0.84--0.88 reported by Villar \& de Andrade (2024). Our protocol never resamples validation data and uses only semester-1 information, which can explain part of the gap.
+\item \textbf{New cohort:} with leave-one-cohort-out (macro variables removed), soft voting scores 0.690 (cohorts from 0.64 to 0.75), LightGBM 0.683, the baseline 0.670: about $-0.02$, same ranking.
+\item \textbf{Hardest class:} \textit{Enrolled} stays at F1 $\approx$ 0.51--0.53 for the best models.
+\end{itemize}
+
+\section{Risks and plan for week 4}
+\begin{itemize}
+\item \textbf{Final model:} soft voting with class weights and the dropout threshold, compared with the baseline once on the sealed test set.
+\item \textbf{Interpretation:} permutation importance on the final model (more reliable than the TabNet masks), error analysis by class and by course.
+\item \textbf{Remaining risks:} timing of the financial variables, cohort shift, single institution, modest gain over the baseline.
+\item Final \LaTeX\ report, slides and individual oral defense.
+\end{itemize}
+
+\section{AI usage}
+Generative AI was used as an accelerator for code drafting, EDA and report drafting. Every output was run and reviewed by the module owner. The prompts and the errors caught in AI outputs are documented in \texttt{ai\_governance/PROMPT\_LOG.md} and \texttt{ai\_governance/AI\_AUDIT.md}; module ownership is in \texttt{CONTRIBUTIONS.md}.
+
+\section*{References}
+\small
+\begin{itemize}
+\item Realinho, V., Vieira Martins, M., Machado, J., Baptista, L. (2021). \textit{Predict Students' Dropout and Academic Success} [Dataset]. UCI Machine Learning Repository. \url{https://doi.org/10.24432/C5MC89}
+\item Realinho, V., Machado, J., Baptista, L., Martins, M.V. (2022). Predicting Student Dropout and Academic Success. \textit{Data}, 7(11), 146. \url{https://doi.org/10.3390/data7110146}
+\item Martins, M.V., Tolledo, D., Machado, J., Baptista, L.M.T., Realinho, V. (2021). Early Prediction of Student's Performance in Higher Education: A Case Study. \textit{Trends and Applications in Information Systems and Technologies (WorldCIST 2021)}, Springer. \url{https://doi.org/10.1007/978-3-030-72657-7_16}
+\item Villar, A., de Andrade, C.R.V. (2024). Supervised machine learning algorithms for predicting student dropout and academic success: a comparative study. \textit{Discover Artificial Intelligence}, 4, 2. \url{https://doi.org/10.1007/s44163-023-00079-z}
+\item Kim, S., Yoo, E., Kim, S. (2023). Why Do Students Drop Out? University Dropout Prediction and Associated Factor Analysis Using Machine Learning Techniques. arXiv:2310.10987.
+\item Arik, S.Ö., Pfister, T. (2021). TabNet: Attentive Interpretable Tabular Learning. \textit{Proceedings of the AAAI Conference on Artificial Intelligence}, 35(8).
+\item Grinsztajn, L., Oyallon, E., Varoquaux, G. (2022). Why do tree-based models still outperform deep learning on typical tabular data? \textit{NeurIPS 2022, Datasets and Benchmarks Track}.
+\item Ke, G. et al.\ (2017). LightGBM: A Highly Efficient Gradient Boosting Decision Tree. \textit{Advances in Neural Information Processing Systems 30}.
+\item Chen, T., Guestrin, C. (2016). XGBoost: A Scalable Tree Boosting System. \textit{Proceedings of KDD 2016}.
+\item Chawla, N.V., Bowyer, K.W., Hall, L.O., Kegelmeyer, W.P. (2002). SMOTE: Synthetic Minority Over-sampling Technique. \textit{Journal of Artificial Intelligence Research}, 16.
+\item Wolpert, D.H. (1992). Stacked generalization. \textit{Neural Networks}, 5(2).
+\end{itemize}
+\end{document}
