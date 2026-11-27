@@ -1,0 +1,20 @@
+{
+ "Random forest": {
+  "class_weight": "balanced",
+  "max_depth": 20,
+  "max_features": "sqrt",
+  "min_samples_leaf": 1,
+  "n_estimators": 221
+ },
+ "LightGBM": {
+  "class_weight": "balanced",
+  "colsample_bytree": 0.6061695553391381,
+  "learning_rate": 0.017240892195821537,
+  "min_child_samples": 30,
+  "n_estimators": 260,
+  "num_leaves": 19,
+  "reg_lambda": 0.27964859516062457,
+  "subsample": 0.6028265220878869,
+  "subsample_freq": 1
+ }
+}
